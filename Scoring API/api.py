@@ -46,8 +46,7 @@ class ValidationError(Exception):
 
 class Validator:
     """Базовый класс для проверки данных"""
-
-    def __init__(self, required, nullable):
+    def __init__(self, required, nullable=False):
         self.required = required
         self.nullable = nullable
         self.data = WeakKeyDictionary()
@@ -58,75 +57,70 @@ class Validator:
     def __get__(self, instance, owner):
         return self.data[instance]
 
-    def validate(self, value):
+    def __set__(self, instance, value):
         if not self.nullable and value is None:
             raise ValidationError(f"{self.name} can`t be None")
+        value = self.validate(value)
+        self.data[instance] = value
 
+    def validate(self, value):
+        raise NotImplementedError
+        
 
 class CharField(Validator):
     """Валидация строковых данных"""
-
-    def __set__(self, instance, value):
+    def validate(self, value):
         if value is not None and not isinstance(value, str):
             raise ValidationError(f"{self.name} must be Str")
-        self.validate(value)
-        self.data[instance] = value
-
+        return value
+        
 
 class ArgumentsField(Validator):
     """Валидация аргументов запроса"""
-
-    def __set__(self, instance, value):
+    def validate(self, value):
         if value is not None and not isinstance(value, dict):
             raise ValidationError(f"{self.name} must be dict")
-        self.validate(value)
-        self.data[instance] = value
-
+        return value
+        
 
 class EmailField(CharField):
     """Валидация e-mail'ов"""
-
-    def __set__(self, instance, value):
+    def validate(self, value):
+        super().validate(value)
         if isinstance(value, str) and '@' not in value:
             raise ValidationError(f"{self.name} must have @")
-        self.validate(value)
-        self.data[instance] = value
+        return value
 
 
 class PhoneField(Validator):
     """Валдиация телефона"""
-
-    def __set__(self, instance, value):
+    def validate(self, value):
         if value is not None:
             if len(str(value)) != 11:
                 raise ValidationError(f"{self.name} must have 11 symbols")
             if str(value)[0] != '7':
                 raise ValidationError(f"{self.name} must have 7 in the start of value")
-        self.validate(value)
-        self.data[instance] = value
+        return value
 
 
 class DateField(Validator):
     """Валидация даты"""
-
-    def __set__(self, instance, value):
+    def validate(self, value):
         if value is not None:
             value = datetime.datetime.strptime(value, '%d.%m.%Y')
-        self.validate(value)
-        self.data[instance] = value
+        return value
 
 
 class BirthDayField(Validator):
     """Валдация дней рождений"""
     age_filter = 70
 
-    def __set__(self, instance, value):
+    def validate(self, value):
         if value is not None:
             value = datetime.datetime.strptime(value, '%d.%m.%Y')
             if self.is_less_than(value):
                 raise ValidationError(f"{self.name} is less then {self.age_filter}")
-        self.validate(value)
-        self.data[instance] = value
+        return value
 
     def is_less_than(self, value):
         from_date = datetime.datetime.now()
@@ -139,59 +133,56 @@ class BirthDayField(Validator):
 
 class GenderField(Validator):
     """Валидация пола"""
-    def __set__(self, instance, value):
+    def validate(self, value):
         if value is not None and not isinstance(value, int):
             raise ValidationError(f"{self.name} must be int")
         if value not in (0, 1, 2, None):
             raise ValidationError(f"{self.name} must be 0, 1, 2 or None")
-        self.validate(value)
-        self.data[instance] = value
+        return value
 
 
-class ClientIDsField:
+class ClientIDsField(Validator):
     """Валидация id клиентов"""
-    def __init__(self, required):
-        self.required = required
-        self.data = WeakKeyDictionary()
-
-    def __get__(self, instance, owner):
-        return self.data[instance]
-
-    def __set__(self, instance, value):
+    def validate(self, value):
         if value is None:
             raise ValidationError("Client Id can't be None")
         if not isinstance(value, list):
             raise ValidationError("Client Id must be List")
         if set(isinstance(i, int) for i in value) != {True}:
             raise ValidationError("Client Id can have digit only")
-        self.data[instance] = value
-
-
-class ClientsInterestsRequest:
-    """Класс для обработки запросов ClientsInterests"""
-    client_ids = ClientIDsField(required=True)
-    date = DateField(required=False, nullable=True)
-    error = None
-
-    def __init__(self, arguments):
-        try:
-            self.client_ids = arguments['client_ids']
-            self.date = arguments.get('date')
-        except Exception as e:
-            self.error = str(e)
+        return value
 
 
 class AllArgsMetaclass(type):
 
-    def __new__(cls, name, bases, dct):
-        attr_required = tuple(name for name, value in dct.items() if not name.startswith('__') and not name.endswith('_func') and value.required)
-        attr_none_required = tuple(name for name, value in dct.items() if not name.startswith('__') and not name.endswith('_func') and not value.required)
+    def __new__(mcs, name, bases, dct):
+        attr_required = tuple(name for name, value in dct.items() if isinstance(value, Validator) and value.required)
+        attr_none_required = tuple(name for name, value in dct.items() if isinstance(value, Validator) and not value.required)
         dct['attr_req'] = attr_required
         dct['attr_non_req'] = attr_none_required
-        return type.__new__(cls, name, bases, dct)
+        return type.__new__(mcs, name, bases, dct)
 
 
-class OnlineScoreRequest(metaclass=AllArgsMetaclass):
+class MasterRequest(metaclass=AllArgsMetaclass):
+    """Базовый класс для классов запросов"""
+    def __init__(self, arguments):
+        try:
+            for arg in self.attr_req:
+                self.__setattr__(arg, arguments[arg])
+            for arg in self.attr_non_req:
+                self.__setattr__(arg, arguments.get(arg))
+            self.error = None
+        except Exception as e:
+            self.error = str(e)
+
+
+class ClientsInterestsRequest(MasterRequest):
+    """Класс для обработки запросов ClientsInterests"""
+    client_ids = ClientIDsField(required=True)
+    date = DateField(required=False, nullable=True)
+
+
+class OnlineScoreRequest(MasterRequest):
     """Класс для обработки запросов OnlineScore"""
     first_name = CharField(required=False, nullable=True)
     last_name = CharField(required=False, nullable=True)
@@ -199,17 +190,6 @@ class OnlineScoreRequest(metaclass=AllArgsMetaclass):
     phone = PhoneField(required=False, nullable=True)
     birthday = BirthDayField(required=False, nullable=True)
     gender = GenderField(required=False, nullable=True)
-
-    def __init__(self, arguments: dict):
-        try:
-            for arg in self.attr_req:
-                self.__setattr__(arg, arguments[arg])
-            for arg in self.attr_non_req:
-                self.__setattr__(arg, arguments.get(arg))
-            self.has = self.create_has_func(arguments)
-            self.error = None
-        except Exception as e:
-            self.error = str(e)
 
     def validate_args_func(self) -> bool:
         """Определение валидности запроса"""
@@ -221,7 +201,7 @@ class OnlineScoreRequest(metaclass=AllArgsMetaclass):
             return True
         return False
 
-    def create_has_func(self, arguments: dict) -> list:
+    def define_has(self, arguments: dict) -> list:
         """Фиксация ненулевых данных в запросе"""
         has = []
         for arg in self.attr_req + self.attr_non_req:
@@ -230,7 +210,7 @@ class OnlineScoreRequest(metaclass=AllArgsMetaclass):
         return has
 
 
-class MethodRequest(metaclass=AllArgsMetaclass):
+class MethodRequest(MasterRequest):
     """Класс для обработки шапки запроса"""
 
     account = CharField(required=False, nullable=True)
@@ -238,16 +218,6 @@ class MethodRequest(metaclass=AllArgsMetaclass):
     token = CharField(required=True, nullable=True)
     arguments = ArgumentsField(required=True, nullable=True)
     method = CharField(required=True, nullable=False)
-
-    def __init__(self, request):
-        try:
-            for arg in self.attr_req:
-                self.__setattr__(arg, request['body'][arg])
-            for arg in self.attr_non_req:
-                self.__setattr__(arg, request['body'].get(arg))
-            self.error = None
-        except Exception as e:
-            self.error = str(e)
 
     @property
     def is_admin_func(self):
@@ -275,7 +245,7 @@ def online_scor_handler(request: MethodRequest, ctx: dict) -> tuple:
         code = 422
         response = 'Not enough data in arguments'
     else:
-        ctx['has'] = online_score.has
+        ctx['has'] = online_score.define_has(request.arguments)
         if request.is_admin_func:
             code = 200
             response = {"score": 42}
@@ -309,7 +279,7 @@ def clients_interests_handler(request: MethodRequest, ctx: dict) -> tuple:
 def method_handler(request: dict, ctx: dict, store) -> tuple:
     """Обработка JSON запроса"""
     response, code = None, None
-    request = MethodRequest(request)
+    request = MethodRequest(request['body'])
     if request.error is not None:
         code = 422
         response = request.error
